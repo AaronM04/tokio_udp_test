@@ -22,6 +22,7 @@ use std::net::SocketAddr;
 use std::process::exit;
 use std::time::Duration;
 use std::collections::HashMap;
+use std::cell::RefCell;
 use futures::*;
 use futures::future::ok;
 use futures::sync::mpsc;
@@ -85,7 +86,7 @@ struct GameSlot {
 struct ServerState {
     tick:           u64,
     ctr:            u64,
-    players:        Vec<Player>,
+    players:        Vec<RefCell<Player>>,
     player_map:     HashMap<String, PlayerID>,      // map cookie to player ID
     game_slots:     Vec<GameSlot>,
     next_player_id: PlayerID,  // index into players
@@ -127,17 +128,21 @@ impl ServerState {
 
     fn is_unique_name(&self, name: &str) -> bool {
         for ref player in self.players.iter() {
-            if player.player_name == name {
+            if player.borrow().player_name == name {
                 return false;
             }
         }
         true
     }
 
-    fn get_player_id_by_cookie(&self, cookie: &str) -> Option<PlayerID> {
+    fn get_player_by_cookie(&self, cookie: &str) -> Option<&RefCell<Player>> {
         match self.player_map.get(cookie) {
-            Some(player_id) => Some(*player_id),
-            None => None
+            None => None,
+            Some(player_id) => {
+                let player_id = *player_id;
+                let player: &RefCell<Player> = self.players.get(player_id.0).unwrap();
+                Some(player)
+            }
         }
     }
 
@@ -167,7 +172,7 @@ impl ServerState {
 
                         // save player into players vec, and save player ID into hash map using cookie
                         self.player_map.insert(cookie.clone(), player.player_id);
-                        self.players.push(player);
+                        self.players.push(RefCell::new(player));
 
                         let response = Packet::Response{
                             sequence:    sequence,
@@ -186,17 +191,17 @@ impl ServerState {
                             return Err(Box::new(io::Error::new(ErrorKind::InvalidData, "cookie required for non-connect actions")));
                         }
                     };
-                    let player_id = match self.get_player_id_by_cookie(cookie.as_str()) {
-                        Some(player_id) => player_id,
+                    let player: &RefCell<Player> = match self.get_player_by_cookie(cookie.as_str()) {
+                        Some(player) => player,
                         None => {
                             return Err(Box::new(io::Error::new(ErrorKind::PermissionDenied, "invalid cookie")));
                         }
                     };
-                    //XXX same thing as get_player_id_by_cookie
-                    let player: &mut Player = self.players.get_mut(player_id.0).unwrap();
                     match action {
                         RequestAction::Connect{..} => unreachable!(),
                         _ => {
+                            // any action other than Connect
+                            let mut player = player.borrow_mut();
                             let response_code = self.process_request_action(action);
                             let sequence = player.next_resp_seq;
                             player.next_resp_seq += 1;
@@ -242,6 +247,8 @@ impl ServerState {
         if self.has_pending_players() {
             if let Some(mut a) = self.players.pop() {
                 if let Some(mut b) = self.players.pop() {
+                    let a = a.borrow_mut();
+                    let b = b.borrow_mut();
                     let game_slot = self.new_game_slot(vec![a.player_id, b.player_id]);
                     a.game = Some(GamePlayer{ game_slot_id: game_slot.game_slot_id });
                     b.game = Some(GamePlayer{ game_slot_id: game_slot.game_slot_id });
@@ -288,7 +295,7 @@ impl ServerState {
         ServerState {
             tick:              0,
             ctr:               0,
-            players:           Vec::<Player>::new(),
+            players:           Vec::<RefCell<Player>>::new(),
             game_slots:        Vec::<GameSlot>::new(),
             player_map:        HashMap::<String, PlayerID>::new(),
             next_player_id:    PlayerID(0),
